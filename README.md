@@ -1,4 +1,4 @@
-# PortDock 🚀⚡
+# PortDock ⚙️
 
 > **Stop wrestling with port numbers and broken local environments.** 
 
@@ -8,7 +8,7 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 
 ---
 
-## 🔥 Why PortDock Destroys the Alternatives
+## ⚡ Why PortDock Beats the Alternatives
 
 * **Zero Hosts-File Hell:** No more manually editing your system's `/etc/hosts` file every time you spin up a new project. PortDock handles routing dynamically.
 * **Instant Production-Grade HTTPS:** Automatically generates trusted local SSL certificates via `mkcert` on the fly, meaning secure cookies, token redirects, and HTTPS webhooks will finally behave identically to production.
@@ -18,7 +18,7 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 
 ---
 
-## 🛠️ Tech Stack & Architecture
+## 💻 Tech Stack & Architecture
 
 * **Core Engine:** Built on asynchronous Python (`asyncio` + `aiohttp`) for high-concurrency performance and minimal overhead.
 * **Security & TLS:** Integrated `mkcert` wrapper for local certificate authority generation.
@@ -26,17 +26,24 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 
 ---
 
-## ⚙️ Prerequisites & Setup (Windows)
+## 🛠️ Prerequisites & Setup
 
+### Windows
 1. **Python 3.8+** installed on your machine.
 2. **`mkcert`** installed and set up inside your project directory as `mkcert.exe` for zero-warning local SSL.
+
+### macOS & Linux
+1. **Python 3.8+** installed on your system.
+2. **`mkcert`** and **`nss`** installed via your package manager:
+   * **macOS:** `brew install mkcert nss`
+   * **Linux (Debian/Ubuntu):** `sudo apt install libnss3-tools` then download/install `mkcert` from its official releases.
+3. Initialize the local CA by running: `mkcert -install` in your terminal.
 
 ---
 
 ## 🚀 Quick Start Guide
 
 1. Clone or open your project directory containing `portdock.py`.
-2. Ensure `mkcert.exe` sits in the root folder alongside the script.
-3. Install the required high-performance networking dependencies:
+2. Install the required high-performance networking dependencies:
    ```bash
    pip install aiohttp multidict
