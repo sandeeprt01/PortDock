@@ -1,4 +1,4 @@
-# PortDock ⚙️
+# PortDock 😈
 
 > **Stop wrestling with port numbers and broken local environments.** 
 
@@ -8,7 +8,7 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 
 ---
 
-## ⚡ Why PortDock Beats the Alternatives
+## 👽 Why PortDock Beats the Alternatives
 
 * **Zero Hosts-File Hell:** No more manually editing your system's `/etc/hosts` file every time you spin up a new project. PortDock handles routing dynamically.
 * **Instant Production-Grade HTTPS:** Automatically generates trusted local SSL certificates via `mkcert` on the fly, meaning secure cookies, token redirects, and HTTPS webhooks will finally behave identically to production.
@@ -41,7 +41,7 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 
 ---
 
-## 🚀 Quick Start Guide
+## 🏎️ Quick Start Guide
 
 1. Clone or open your project directory containing `portdock.py`.
 2. Install the required high-performance networking dependencies:
