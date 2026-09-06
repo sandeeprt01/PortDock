@@ -8,227 +8,107 @@ import ssl
 import subprocess
 from collections import deque
 from datetime import datetime
-from urllib.parse import urlparse, urljoin
-from aiohttp import (
-    ClientSession,
-    ClientTimeout,
-    WSMsgType,
-    web,
-)
+from urllib.parse import urljoin, urlparse
+from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from multidict import CIMultiDict
-# ============================================================
-# CONFIG
-# ============================================================
-BASE_DIR = os.path.dirname(
-    os.path.abspath(__file__)
-)
-ROUTES_FILE = os.path.join(
-    BASE_DIR,
-    "routes.json"
-)
-MKCERT_FILE = os.path.join(
-    BASE_DIR,
-    "mkcert.exe"
-)
-CERT_DIR = os.path.join(
-    BASE_DIR,
-    "certificates"
-)
-os.makedirs(
-    CERT_DIR,
-    exist_ok=True
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROUTES_FILE = os.path.join(BASE_DIR, "routes.json")
+MKCERT_FILE = os.path.join(BASE_DIR, "mkcert.exe")
+CERT_DIR = os.path.join(BASE_DIR, "certificates")
+os.makedirs(CERT_DIR, exist_ok=True)
 DASHBOARD_HOST = "portdock.localhost"
 HTTP_PORT = 80
 HTTPS_PORT = 443
-REQUEST_LOGS = deque(
-    maxlen=50
-)
+REQUEST_LOGS = deque(maxlen=50)
 SSL_CONTEXTS = {}
-# ============================================================
-# ROUTES
-# ============================================================
+ACTIVE_WEBSOCKETS = 0
 def normalize_target(target):
     if isinstance(target, int):
         return f"http://127.0.0.1:{target}"
     target = str(target).strip()
-    # Support old routes.json values like "8501"
     if target.isdigit():
         return f"http://127.0.0.1:{target}"
     return target
 def load_routes():
-    try:
-        with open(
-            ROUTES_FILE,
-            "r",
-            encoding="utf-8"
-        ) as file:
-            data = json.load(file)
-        routes = {}
-        for domain, target in data.items():
-            routes[
-                domain.strip().lower()
-            ] = normalize_target(
-                target
-            )
-        return routes
-    except FileNotFoundError:
+    if not os.path.exists(ROUTES_FILE):
         return {}
-    except Exception as error:
-        print(
-            "[ROUTES ERROR]",
-            error
-        )
+    try:
+        with open(ROUTES_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        return {
+            domain: normalize_target(target)
+            for domain, target in data.items()
+        }
+    except Exception:
         return {}
 def save_routes(routes):
-    with open(
-        ROUTES_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-        json.dump(
-            routes,
-            file,
-            indent=4
-        )
-# ============================================================
-# TARGET VALIDATION
-# ============================================================
+    with open(ROUTES_FILE, "w", encoding="utf-8") as file:
+        json.dump(routes, file, indent=4)
 def validate_target_url(url):
     url = url.strip()
-    if not url.startswith(
-        (
-            "http://",
-            "https://"
-        )
-    ):
+    if not url.startswith(("http://", "https://")):
         url = "http://" + url
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in [
-            "http",
-            "https"
-        ]:
+        if parsed.scheme not in ["http", "https"]:
             return None
         if not parsed.hostname:
             return None
-        # Don't allow usernames/passwords
-        # embedded inside URLs.
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        if parsed.hostname.lower() == DASHBOARD_HOST:
+            return None
         if (
-            parsed.username is not None
-            or
-            parsed.password is not None
+            parsed.hostname in ["localhost", "127.0.0.1"]
+            and parsed.port in [80, 443]
         ):
-            return None
-        # Prevent users from routing PortDock
-        # back into itself and creating a loop.
-        if parsed.hostname.lower() in [
-            "portdock.localhost"
-        ]:
-            return None
-        if parsed.port in [
-            80,
-            443
-        ] and parsed.hostname in [
-            "localhost",
-            "127.0.0.1"
-        ]:
             return None
         return url.rstrip("/")
     except ValueError:
         return None
-# ============================================================
-# SERVICE NAME
-# ============================================================
 def clean_service_name(name):
-    name = (
-        str(name)
-        .lower()
-        .strip()
-    )
-    if not re.fullmatch(
-        r"[a-z0-9-]+",
-        name
-    ):
+    name = name.strip().lower()
+    if not re.fullmatch(r"[a-z0-9-]+", name):
         return None
     return name
-# ============================================================
-# LOCAL / REMOTE HELPERS
-# ============================================================
 def is_local_target(target):
     try:
-        parsed = urlparse(target)
-        return parsed.hostname in [
-            "localhost",
-            "127.0.0.1"
-        ]
+        host = urlparse(target).hostname
+        return host in ["localhost", "127.0.0.1"]
     except Exception:
         return False
 def local_target_running(target):
     try:
         parsed = urlparse(target)
-        if parsed.hostname not in [
-            "localhost",
-            "127.0.0.1"
-        ]:
-            return True
-        if parsed.port is None:
-            return False
-        sock = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM
-        )
-        sock.settimeout(0.25)
-        result = sock.connect_ex(
-            (
-                "127.0.0.1",
-                parsed.port
-            )
-        )
+        host = parsed.hostname
+        if host == "localhost":
+            host = "127.0.0.1"
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme == "https" else 80
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.3)
+        result = sock.connect_ex((host, port))
         sock.close()
         return result == 0
     except Exception:
         return False
 def port_is_used(port):
-    sock = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
-    sock.settimeout(0.25)
-    result = sock.connect_ex(
-        (
-            "127.0.0.1",
-            port
-        )
-    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.3)
+    result = sock.connect_ex(("127.0.0.1", port))
     sock.close()
     return result == 0
-# ============================================================
-# BUILD BACKEND URL
-# ============================================================
-def build_backend_url(
-    target,
-    request
-):
+def build_backend_url(target, request):
     target = target.rstrip("/") + "/"
-    relative = request.rel_url.path.lstrip("/")
-    backend = urljoin(
-        target,
-        relative
-    )
+    path = request.rel_url.path.lstrip("/")
+    backend = urljoin(target, path)
     if request.rel_url.query_string:
-        backend += (
-            "?"
-            +
-            request.rel_url.query_string
-        )
+        backend += "?" + request.rel_url.query_string
     return backend
 def target_origin(target):
     parsed = urlparse(target)
-    origin = (
-        f"{parsed.scheme}://"
-        f"{parsed.hostname}"
-    )
+    origin = f"{parsed.scheme}://{parsed.hostname}"
     if parsed.port:
         default_port = (
             parsed.scheme == "http"
@@ -240,99 +120,68 @@ def target_origin(target):
         if not default_port:
             origin += f":{parsed.port}"
     return origin
-# ============================================================
-# TLS CERTIFICATE MANAGEMENT
-# ============================================================
+def get_hostname(request):
+    return request.host.split(":")[0].lower()
 def certificate_paths(domain):
     safe_name = re.sub(
         r"[^a-zA-Z0-9_-]",
         "_",
         domain
     )
-    return (
-        os.path.join(
-            CERT_DIR,
-            safe_name + ".crt"
-        ),
-        os.path.join(
-            CERT_DIR,
-            safe_name + ".key"
-        )
+    cert_file = os.path.join(
+        CERT_DIR,
+        safe_name + ".crt"
     )
+    key_file = os.path.join(
+        CERT_DIR,
+        safe_name + ".key"
+    )
+    return cert_file, key_file
 def generate_certificate(domain):
-    cert_file, key_file = (
-        certificate_paths(domain)
-    )
+    cert_file, key_file = certificate_paths(domain)
     if (
         os.path.exists(cert_file)
-        and
-        os.path.exists(key_file)
+        and os.path.exists(key_file)
     ):
         return cert_file, key_file
-    if not os.path.exists(
-        MKCERT_FILE
-    ):
-        print(
-            "ERROR: mkcert.exe not found."
-        )
-        return None, None
-    print(
-        f"[TLS] Creating certificate "
-        f"for {domain}"
+    print(f"[TLS] Creating certificate for {domain}")
+    subprocess.run(
+        [
+            MKCERT_FILE,
+            "-cert-file",
+            cert_file,
+            "-key-file",
+            key_file,
+            domain
+        ],
+        cwd=BASE_DIR,
+        check=True
     )
-    try:
-        subprocess.run(
-            [
-                MKCERT_FILE,
-                "-cert-file",
-                cert_file,
-                "-key-file",
-                key_file,
-                domain
-            ],
-            cwd=BASE_DIR,
-            check=True
-        )
-        print(
-            f"[TLS] Ready: {domain}"
-        )
-        return cert_file, key_file
-    except Exception as error:
-        print(
-            "[TLS ERROR]",
-            error
-        )
-        return None, None
+    return cert_file, key_file
 def create_domain_ssl_context(domain):
-    cert_file, key_file = (
-        generate_certificate(domain)
-    )
-    if not cert_file:
-        return None
+    cert_file, key_file = generate_certificate(domain)
     context = ssl.SSLContext(
         ssl.PROTOCOL_TLS_SERVER
     )
     context.load_cert_chain(
-        certfile=cert_file,
-        keyfile=key_file
+        cert_file,
+        key_file
     )
-    SSL_CONTEXTS[
-        domain
-    ] = context
+    SSL_CONTEXTS[domain] = context
     return context
 def create_main_ssl_context():
-    context = create_domain_ssl_context(
-        DASHBOARD_HOST
-    )
-    if context is None:
-        raise RuntimeError(
-            "Could not prepare dashboard TLS."
-        )
     routes = load_routes()
+    create_domain_ssl_context(DASHBOARD_HOST)
     for domain in routes:
-        create_domain_ssl_context(
-            domain
-        )
+        try:
+            create_domain_ssl_context(domain)
+        except Exception as error:
+            print(
+                f"[TLS ERROR] {domain}: {error}"
+            )
+    main_context = SSL_CONTEXTS[
+        DASHBOARD_HOST
+    ]
     def sni_callback(
         ssl_socket,
         server_name,
@@ -340,175 +189,118 @@ def create_main_ssl_context():
     ):
         if not server_name:
             return
-        domain = (
-            server_name
-            .lower()
-            .strip()
-        )
-        domain_context = (
-            SSL_CONTEXTS.get(
+        domain = server_name.lower()
+        if domain in SSL_CONTEXTS:
+            ssl_socket.context = SSL_CONTEXTS[
                 domain
-            )
-        )
-        if domain_context:
-            ssl_socket.context = (
-                domain_context
-            )
-    context.set_servername_callback(
+            ]
+    main_context.set_servername_callback(
         sni_callback
     )
-    return context
-# ============================================================
-# HOSTNAME
-# ============================================================
-def get_hostname(request):
-    return (
-        request.host
-        .split(":")[0]
-        .lower()
-        .strip()
-    )
-# ============================================================
-# DASHBOARD
-# ============================================================
-def build_dashboard(
-    message=None,
-    message_type="success"
+    return main_context
+def log_request(
+    method,
+    host,
+    target,
+    request_type,
+    status="FORWARDED"
 ):
+    REQUEST_LOGS.appendleft(
+        {
+            "time": datetime.now().strftime(
+                "%H:%M:%S"
+            ),
+            "method": method,
+            "host": host,
+            "target": target,
+            "type": request_type,
+            "status": status
+        }
+    )
+def build_dashboard(message=""):
     routes = load_routes()
     service_rows = ""
     local_running = 0
-    remote_count = 0
+    remote_targets = 0
     for domain, target in routes.items():
-        name = domain.replace(
-            ".localhost",
-            ""
-        )
-        if is_local_target(target):
-            running = (
-                local_target_running(
-                    target
-                )
-            )
+        local = is_local_target(target)
+        if local:
+            running = local_target_running(target)
             if running:
                 local_running += 1
-                status = (
-                    '<span class="running">'
-                    'RUNNING'
-                    '</span>'
-                )
-            else:
-                status = (
-                    '<span class="offline">'
-                    'OFFLINE'
-                    '</span>'
-                )
             target_type = "LOCAL"
-        else:
-            remote_count += 1
             status = (
-                '<span class="remote">'
-                'REMOTE'
-                '</span>'
+                "RUNNING"
+                if running
+                else "OFFLINE"
             )
+            status_class = (
+                "green"
+                if running
+                else "red"
+            )
+        else:
+            remote_targets += 1
             target_type = "REMOTE"
+            status = "REMOTE"
+            status_class = "blue"
+        escaped_domain = html.escape(domain)
+        escaped_target = html.escape(target)
         service_rows += f"""
         <tr>
             <td>
-                {html.escape(name)}
+                <strong>{escaped_domain}</strong>
             </td>
             <td>
                 <a
-                    href="https://{html.escape(domain)}"
+                    href="https://{escaped_domain}"
                     target="_blank"
-                    class="link"
                 >
-                    https://{html.escape(domain)}
+                    https://{escaped_domain}
                 </a>
             </td>
-            <td class="backend">
-                {html.escape(target)}
+            <td>
+                {escaped_target}
             </td>
             <td>
-                {target_type}
+                <span class="badge">
+                    {target_type}
+                </span>
             </td>
             <td>
-                {status}
+                <span class="badge {status_class}">
+                    {status}
+                </span>
             </td>
             <td>
-                <div class="actions">
-                    <a
-                        class="open"
-                        href="https://{html.escape(domain)}"
-                        target="_blank"
-                    >
-                        Open
-                    </a>
-                    <form
-                        method="POST"
-                        action="/__portdock__/remove/{html.escape(name)}"
-                    >
-                        <button
-                            class="remove"
-                        >
-                            Remove
-                        </button>
-                    </form>
-                </div>
+                <span class="badge green">
+                    HTTPS
+                </span>
+            </td>
+            <td>
+                <form
+                    method="POST"
+                    action="/__portdock__/remove/{escaped_domain}"
+                >
+                    <button class="remove">
+                        Remove
+                    </button>
+                </form>
             </td>
         </tr>
         """
     if not service_rows:
         service_rows = """
         <tr>
-            <td
-                colspan="6"
-                class="empty"
-            >
-                No services registered.
-            </td>
-        </tr>
-        """
-    log_rows = ""
-    for log in reversed(
-        REQUEST_LOGS
-    ):
-        log_rows += f"""
-        <tr>
-            <td>
-                {html.escape(log["time"])}
-            </td>
-            <td>
-                {html.escape(log["method"])}
-            </td>
-            <td>
-                {html.escape(log["host"])}
-            </td>
-            <td>
-                {html.escape(log["target"])}
-            </td>
-            <td>
-                {html.escape(log["type"])}
-            </td>
-        </tr>
-        """
-    if not log_rows:
-        log_rows = """
-        <tr>
-            <td
-                colspan="5"
-                class="empty"
-            >
-                No proxy requests yet.
+            <td colspan="7">
+                No services registered yet.
             </td>
         </tr>
         """
     message_html = ""
     if message:
         message_html = f"""
-        <div
-            class="message {message_type}"
-        >
+        <div class="message">
             {html.escape(message)}
         </div>
         """
@@ -516,228 +308,285 @@ def build_dashboard(
 <!DOCTYPE html>
 <html>
 <head>
+<title>PortDock Dashboard</title>
 <meta charset="UTF-8">
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1"
->
-<title>
-PortDock Dashboard
-</title>
 <style>
 * {{
     box-sizing: border-box;
 }}
 body {{
     margin: 0;
-    background: #090c11;
-    color: white;
-    font-family:
-        Arial,
-        Helvetica,
-        sans-serif;
+    font-family: Arial, sans-serif;
+    background: #0b0f19;
+    color: #e8eaf0;
 }}
 .container {{
     width: 94%;
-    max-width: 1250px;
-    margin: auto;
-    padding: 40px 0;
+    max-width: 1400px;
+    margin: 35px auto;
 }}
 h1 {{
-    margin: 0;
-    font-size: 38px;
+    margin-bottom: 5px;
+    font-size: 34px;
 }}
 .subtitle {{
-    color: #9da8ba;
-    margin-top: 10px;
+    color: #8e98ad;
+    margin-bottom: 30px;
 }}
-.badge {{
-    display: inline-block;
-    margin-top: 15px;
-    padding: 9px 14px;
-    background: #103c28;
-    color: #5ce39d;
-    border-radius: 8px;
-    font-weight: bold;
-}}
-.stats {{
+.cards {{
     display: grid;
-    grid-template-columns:
-        repeat(3, 1fr);
-    gap: 18px;
-    margin-top: 30px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 15px;
+    margin-bottom: 25px;
 }}
 .card {{
-    background: #151922;
-    border:
-        1px solid #2a303a;
-    border-radius: 14px;
-    padding: 22px;
-    margin-top: 22px;
+    background: #141a28;
+    border: 1px solid #242d40;
+    border-radius: 12px;
+    padding: 20px;
 }}
-.stat-title {{
-    color: #9ea8b8;
+.card-title {{
+    color: #8e98ad;
+    font-size: 13px;
+    margin-bottom: 10px;
 }}
-.stat-number {{
-    font-size: 32px;
+.card-value {{
+    font-size: 27px;
     font-weight: bold;
-    margin-top: 8px;
 }}
-.form-grid {{
-    display: grid;
-    grid-template-columns:
-        1fr 2fr auto;
-    gap: 14px;
-    align-items: end;
+.section {{
+    background: #141a28;
+    border: 1px solid #242d40;
+    border-radius: 12px;
+    padding: 22px;
+    margin-bottom: 22px;
 }}
-label {{
-    display: block;
-    margin-bottom: 8px;
+.flow {{
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding: 25px;
+}}
+.flow-box {{
+    background: #0e1420;
+    border: 1px solid #303b50;
+    padding: 17px 20px;
+    border-radius: 10px;
+    text-align: center;
+    min-width: 180px;
+}}
+.arrow {{
+    font-size: 25px;
 }}
 input {{
-    width: 100%;
-    padding: 13px;
-    border-radius: 8px;
-    border:
-        1px solid #363d4b;
-    background: #0c1016;
+    background: #0e1420;
+    border: 1px solid #303b50;
     color: white;
+    padding: 12px;
+    border-radius: 7px;
+    width: 280px;
+    margin-right: 8px;
 }}
 button {{
-    border: 0;
-    border-radius: 8px;
+    padding: 12px 18px;
+    border: none;
+    border-radius: 7px;
     cursor: pointer;
+    background: #5267ff;
+    color: white;
     font-weight: bold;
 }}
-.add {{
-    padding: 14px 20px;
-    background: white;
-    color: black;
+button:hover {{
+    opacity: 0.9;
+}}
+.remove {{
+    background: #a83d49;
+    padding: 8px 12px;
 }}
 table {{
     width: 100%;
     border-collapse: collapse;
     margin-top: 15px;
 }}
-th,
-td {{
-    padding: 14px 10px;
-    border-bottom:
-        1px solid #2a303a;
-    text-align: left;
-}}
 th {{
-    color: #9ea8b8;
+    text-align: left;
+    color: #8e98ad;
+    font-size: 12px;
+    border-bottom: 1px solid #30384a;
+    padding: 12px;
 }}
-.backend {{
-    font-family: monospace;
-    max-width: 360px;
-    overflow-wrap: anywhere;
+td {{
+    border-bottom: 1px solid #222a39;
+    padding: 12px;
+    font-size: 14px;
 }}
-.link {{
-    color: #82adff;
+a {{
+    color: #8ca4ff;
     text-decoration: none;
 }}
-.running {{
-    color: #59df9a;
+.badge {{
+    background: #30384b;
+    border-radius: 20px;
+    padding: 5px 9px;
+    font-size: 11px;
     font-weight: bold;
 }}
-.offline {{
-    color: #ff7a7a;
-    font-weight: bold;
+.green {{
+    background: #174e37;
+    color: #7ce4ae;
 }}
-.remote {{
-    color: #82adff;
-    font-weight: bold;
+.red {{
+    background: #58272c;
+    color: #ff9ca4;
 }}
-.actions {{
-    display: flex;
-    gap: 8px;
+.blue {{
+    background: #1d365a;
+    color: #92bfff;
 }}
-.open {{
-    padding: 9px 13px;
-    background: #252b36;
-    color: white;
-    text-decoration: none;
-    border-radius: 8px;
-}}
-.remove {{
-    padding: 9px 13px;
-    background: #421d1d;
-    color: #ff8c8c;
+.orange {{
+    background: #59421e;
+    color: #ffd27c;
 }}
 .message {{
-    padding: 15px;
-    border-radius: 9px;
-    margin-top: 20px;
+    background: #173d30;
+    border: 1px solid #2f7257;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 20px;
 }}
-.success {{
-    background: #103c28;
-    color: #60e6a2;
+.tech {{
+    font-family: Consolas, monospace;
+    color: #a9f0c3;
 }}
-.error {{
-    background: #481c1c;
-    color: #ff8c8c;
+small {{
+    color: #8e98ad;
 }}
-.muted {{
-    color: #9ea8b8;
-}}
-.empty {{
+.more-container {{
     text-align: center;
-    color: #919bac;
+    margin-top: 18px;
 }}
-@media (
-    max-width: 800px
-) {{
-    .stats {{
-        grid-template-columns: 1fr;
-    }}
-    .form-grid {{
-        grid-template-columns: 1fr;
+#readMoreButton {{
+    display: none;
+    background: #30384b;
+}}
+@media(max-width: 900px) {{
+    .cards {{
+        grid-template-columns: 1fr 1fr;
     }}
 }}
 </style>
 </head>
 <body>
 <div class="container">
-<h1>
-PortDock Dashboard
-</h1>
+<h1>⚓ PortDock</h1>
 <div class="subtitle">
-Route local apps and remote websites
-through clean HTTPS .localhost domains.
-</div>
-<div class="badge">
-🔒 HTTPS + HTTP + WebSocket + Remote Targets
+Local Reverse Proxy & Developer Traffic Router
 </div>
 {message_html}
-<div class="stats">
+<div class="cards">
 <div class="card">
-<div class="stat-title">
-Registered Services
+<div class="card-title">
+REGISTERED SERVICES
 </div>
-<div class="stat-number">
+<div class="card-value">
 {len(routes)}
 </div>
 </div>
 <div class="card">
-<div class="stat-title">
-Local Running
+<div class="card-title">
+LOCAL RUNNING
 </div>
-<div class="stat-number">
+<div class="card-value">
 {local_running}
 </div>
 </div>
 <div class="card">
-<div class="stat-title">
-Remote Targets
+<div class="card-title">
+REMOTE TARGETS
 </div>
-<div class="stat-number">
-{remote_count}
-</div>
+<div class="card-value">
+{remote_targets}
 </div>
 </div>
 <div class="card">
+<div class="card-title">
+ACTIVE WEBSOCKETS
+</div>
+<div
+    class="card-value"
+    id="wsCount"
+>
+{ACTIVE_WEBSOCKETS}
+</div>
+</div>
+</div>
+<div class="section">
+<h2>
+Live Reverse Proxy Flow
+</h2>
+<div class="flow">
+<div class="flow-box">
+<strong>
+Browser
+</strong>
+<br><br>
+<span
+    class="tech"
+    id="flowHost"
+>
+https://name.localhost
+</span>
+</div>
+<div class="arrow">
+→
+</div>
+<div class="flow-box">
+<strong>
+PortDock
+</strong>
+<br><br>
+<span class="tech">
+HTTPS :443
+</span>
+<br>
+<small>
+TLS + Routing + Proxy
+</small>
+</div>
+<div class="arrow">
+→
+</div>
+<div class="flow-box">
+<strong>
+Backend
+</strong>
+<br><br>
+<span
+    class="tech"
+    id="flowTarget"
+>
+Waiting for traffic...
+</span>
+</div>
+</div>
+<div style="text-align:center">
+<span class="badge green">
+TLS ACTIVE
+</span>
+<span class="badge blue">
+HTTP PROXY
+</span>
+<span class="badge orange">
+WEBSOCKET PROXY
+</span>
+<span class="badge">
+SNI ENABLED
+</span>
+</div>
+</div>
+<div class="section">
 <h2>
 Add Target
 </h2>
@@ -745,60 +594,35 @@ Add Target
     method="POST"
     action="/__portdock__/add"
 >
-<div class="form-grid">
-<div>
-<label>
-Service Name
-</label>
 <input
     name="name"
-    placeholder="demo"
+    placeholder="Service name (game)"
     required
 >
-</div>
-<div>
-<label>
-Target URL
-</label>
 <input
     name="url"
-    placeholder="https://example.com"
+    placeholder="http://localhost:8501"
     required
 >
-</div>
-<button
-    class="add"
->
+<button>
 Add Target
 </button>
-</div>
 </form>
-<p class="muted">
-Local example:
-http://localhost:8501
-</p>
-<p class="muted">
-Remote example:
-https://example.com
-</p>
-<p class="muted">
-Both become:
-https://name.localhost
-</p>
 </div>
-<div class="card">
+<div class="section">
 <h2>
-Services
+Registered Services
 </h2>
 <table>
 <thead>
 <tr>
 <th>Name</th>
 <th>PortDock URL</th>
-<th>Target</th>
+<th>Backend Target</th>
 <th>Type</th>
 <th>Status</th>
-<th>Actions</th>
+<th>TLS</th>
+<th>Action</th>
 </tr>
 </thead>
 <tbody>
@@ -806,140 +630,270 @@ Services
 </tbody>
 </table>
 </div>
-<div class="card">
+<div class="section">
 <h2>
 Recent Proxy Requests
 </h2>
+<small>
+This proves traffic is passing through PortDock before reaching the backend.
+</small>
 <table>
 <thead>
 <tr>
 <th>Time</th>
 <th>Method</th>
-<th>Host</th>
-<th>Target</th>
-<th>Type</th>
+<th>Hostname</th>
+<th>Backend</th>
+<th>Traffic</th>
+<th>Status</th>
 </tr>
 </thead>
-<tbody>
-{log_rows}
+<tbody id="requestRows">
+<tr>
+<td colspan="6">
+Waiting for requests...
+</td>
+</tr>
 </tbody>
 </table>
+<div class="more-container">
+<button
+    id="readMoreButton"
+    onclick="toggleLogs()"
+>
+Show more
+</button>
 </div>
 </div>
+</div>
+<script>
+let allLogs = [];
+let showAll = false;
+function renderLogs() {{
+    const rows =
+        document.getElementById(
+            "requestRows"
+        );
+    const button =
+        document.getElementById(
+            "readMoreButton"
+        );
+    if (allLogs.length === 0) {{
+        rows.innerHTML = `
+        <tr>
+            <td colspan="6">
+                Waiting for requests...
+            </td>
+        </tr>
+        `;
+        button.style.display =
+            "none";
+        return;
+    }}
+    const visibleLogs =
+        showAll
+        ? allLogs
+        : allLogs.slice(0, 5);
+    let output = "";
+    for (const log of visibleLogs) {{
+        const trafficClass =
+            log.type === "WEBSOCKET"
+            ? "orange"
+            : "blue";
+        const statusClass =
+            log.status === "ERROR"
+            ? "red"
+            : "green";
+        output += `
+        <tr>
+            <td>
+                ${{log.time}}
+            </td>
+            <td>
+                ${{log.method}}
+            </td>
+            <td>
+                ${{log.host}}
+            </td>
+            <td class="tech">
+                ${{log.target}}
+            </td>
+            <td>
+                <span
+                    class="badge ${{trafficClass}}"
+                >
+                    ${{log.type}}
+                </span>
+            </td>
+            <td>
+                <span
+                    class="badge ${{statusClass}}"
+                >
+                    ${{log.status}}
+                </span>
+            </td>
+        </tr>
+        `;
+    }}
+    rows.innerHTML = output;
+    if (allLogs.length > 5) {{
+        button.style.display =
+            "inline-block";
+        if (showAll) {{
+            button.textContent =
+                "Show less";
+        }} else {{
+            button.textContent =
+                "Show more (" +
+                (allLogs.length - 5) +
+                ")";
+        }}
+    }} else {{
+        button.style.display =
+            "none";
+    }}
+}}
+function toggleLogs() {{
+    showAll = !showAll;
+    renderLogs();
+}}
+async function updateStatus() {{
+    try {{
+        const response =
+            await fetch(
+                "/__portdock__/status"
+            );
+        const data =
+            await response.json();
+        document.getElementById(
+            "wsCount"
+        ).textContent =
+            data.active_websockets;
+        allLogs = data.logs;
+        renderLogs();
+        if (data.logs.length > 0) {{
+            const latest =
+                data.logs[0];
+            document.getElementById(
+                "flowHost"
+            ).textContent =
+                "https://" +
+                latest.host;
+            document.getElementById(
+                "flowTarget"
+            ).textContent =
+                latest.target;
+        }}
+    }}
+    catch(error) {{
+        console.log(
+            "Status update failed"
+        );
+    }}
+}}
+updateStatus();
+setInterval(
+    updateStatus,
+    1000
+);
+</script>
 </body>
 </html>
 """
-# ============================================================
-# DASHBOARD HANDLERS
-# ============================================================
 async def dashboard_handler(request):
     return web.Response(
         text=build_dashboard(),
         content_type="text/html"
     )
+async def status_handler(request):
+    return web.json_response(
+        {
+            "active_websockets":
+                ACTIVE_WEBSOCKETS,
+            "logs":
+                list(REQUEST_LOGS)
+        }
+    )
 async def add_service(request):
-    if get_hostname(
-        request
-    ) != DASHBOARD_HOST:
-        raise web.HTTPNotFound()
+    if get_hostname(request) != DASHBOARD_HOST:
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
     form = await request.post()
     name = clean_service_name(
-        form.get(
-            "name",
-            ""
-        )
+        form.get("name", "")
     )
     target = validate_target_url(
-        str(
-            form.get(
-                "url",
-                ""
-            )
-        )
+        form.get("url", "")
     )
     if not name:
         return web.Response(
             text=build_dashboard(
-                "Invalid service name.",
-                "error"
+                "Invalid service name."
             ),
             content_type="text/html"
         )
     if not target:
         return web.Response(
             text=build_dashboard(
-                "Enter a valid HTTP or HTTPS URL.",
-                "error"
+                "Invalid target URL."
             ),
             content_type="text/html"
         )
-    domain = (
-        f"{name}.localhost"
-    )
+    domain = f"{name}.localhost"
     routes = load_routes()
-    routes[
-        domain
-    ] = target
-    save_routes(
-        routes
-    )
-    context = (
+    routes[domain] = target
+    save_routes(routes)
+    try:
         create_domain_ssl_context(
             domain
         )
-    )
-    if context is None:
+    except Exception as error:
         return web.Response(
             text=build_dashboard(
-                "Route saved, but TLS "
-                "certificate generation failed.",
-                "error"
+                f"Route saved but TLS failed: {error}"
             ),
             content_type="text/html"
         )
-    print()
-    print(
-        f"[ROUTE] {domain}"
-        f" -> {target}"
-    )
     return web.Response(
         text=build_dashboard(
-            f"{domain} now routes to {target}",
-            "success"
+            f"{domain} → {target} added successfully."
         ),
         content_type="text/html"
     )
 async def remove_service(request):
-    if get_hostname(
-        request
-    ) != DASHBOARD_HOST:
-        raise web.HTTPNotFound()
-    name = clean_service_name(
-        request.match_info[
-            "name"
-        ]
-    )
-    if not name:
-        raise web.HTTPBadRequest()
-    domain = (
-        f"{name}.localhost"
-    )
+    if get_hostname(request) != DASHBOARD_HOST:
+        return web.Response(
+            status=403,
+            text="Forbidden"
+        )
+    domain = request.match_info[
+        "name"
+    ]
     routes = load_routes()
     routes.pop(
         domain,
         None
     )
-    save_routes(
-        routes
+    save_routes(routes)
+    # Remove all old proxy requests
+    # belonging to this service.
+    remaining_logs = [
+        log
+        for log in REQUEST_LOGS
+        if log.get("host") != domain
+    ]
+    REQUEST_LOGS.clear()
+    REQUEST_LOGS.extend(
+        remaining_logs
     )
-    raise web.HTTPFound(
-        location=(
-            "https://portdock.localhost/"
-        )
+    return web.Response(
+        text=build_dashboard(
+            f"{domain} removed."
+        ),
+        content_type="text/html"
     )
-# ============================================================
-# PROXY HEADERS
-# ============================================================
 HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -954,34 +908,29 @@ HOP_BY_HOP_HEADERS = {
 }
 def make_upstream_headers(
     request,
-    target,
-    websocket=False
+    target
 ):
-    headers = {}
-    for key, value in (
-        request.headers.items()
-    ):
-        lower = key.lower()
-        if lower in HOP_BY_HOP_HEADERS:
-            continue
-        if lower == "host":
-            continue
-        if (
-            websocket
-            and lower.startswith(
-                "sec-websocket-"
-            )
-        ):
-            continue
-        headers[
-            key
-        ] = value
-    host = get_hostname(
-        request
+    headers = CIMultiDict()
+    skip_headers = (
+        HOP_BY_HOP_HEADERS
+        | {
+            "host",
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "sec-websocket-extensions",
+            "sec-websocket-protocol",
+        }
     )
+    for key, value in request.headers.items():
+        if key.lower() in skip_headers:
+            continue
+        headers.add(
+            key,
+            value
+        )
     headers[
         "X-Forwarded-Host"
-    ] = host
+    ] = request.host
     headers[
         "X-Forwarded-Proto"
     ] = "https"
@@ -992,26 +941,16 @@ def make_upstream_headers(
         headers[
             "X-Forwarded-For"
         ] = request.remote
-    # Rewrite browser Origin so
-    # remote/local backend sees its
-    # own origin instead of .localhost.
+    origin = target_origin(
+        target
+    )
     if "Origin" in headers:
-        headers[
-            "Origin"
-        ] = target_origin(
-            target
-        )
+        headers["Origin"] = origin
     if "Referer" in headers:
-        headers[
-            "Referer"
-        ] = (
-            target_origin(target)
-            + "/"
+        headers["Referer"] = (
+            origin + "/"
         )
     return headers
-# ============================================================
-# COOKIE REWRITE
-# ============================================================
 def rewrite_cookie(cookie):
     parts = cookie.split(";")
     cleaned = []
@@ -1022,19 +961,12 @@ def rewrite_cookie(cookie):
             .startswith("domain=")
         ):
             continue
-        cleaned.append(
-            part
-        )
-    return ";".join(
-        cleaned
-    )
-# ============================================================
-# REDIRECT REWRITE
-# ============================================================
+        cleaned.append(part)
+    return ";".join(cleaned)
 def rewrite_location(
     location,
     target,
-    host
+    proxy_host
 ):
     origin = target_origin(
         target
@@ -1044,115 +976,108 @@ def rewrite_location(
     ):
         return location.replace(
             origin,
-            f"https://{host}",
+            f"https://{proxy_host}",
             1
         )
     return location
-# ============================================================
-# HTTP PROXY
-# ============================================================
 async def proxy_http(
     request,
-    target,
-    session
+    target
 ):
+    session = request.app[
+        "session"
+    ]
     host = get_hostname(
         request
     )
-    backend_url = (
-        build_backend_url(
-            target,
-            request
-        )
+    backend_url = build_backend_url(
+        target,
+        request
     )
-    REQUEST_LOGS.append(
-        {
-            "time":
-                datetime.now()
-                .strftime("%H:%M:%S"),
-            "method":
-                request.method,
-            "host":
-                host,
-            "target":
-                target,
-            "type":
-                "HTTP"
-        }
+    log_request(
+        request.method,
+        host,
+        backend_url,
+        "HTTP"
     )
-    headers = (
-        make_upstream_headers(
-            request,
-            target
-        )
+    print(
+        f"[HTTP] {host} -> {backend_url}"
     )
     try:
         body = await request.read()
+        headers = make_upstream_headers(
+            request,
+            target
+        )
         async with session.request(
             method=request.method,
             url=backend_url,
             headers=headers,
             data=body,
             allow_redirects=False
-        ) as backend_response:
+        ) as response:
             response_body = (
-                await backend_response.read()
+                await response.read()
             )
             response_headers = (
                 CIMultiDict()
             )
-            for key, value in (
-                backend_response
-                .headers
-                .items()
-            ):
-                lower = key.lower()
-                if lower in (
-                    HOP_BY_HOP_HEADERS
+            for (
+                key,
+                value
+            ) in response.headers.items():
+                key_lower = (
+                    key.lower()
+                )
+                if (
+                    key_lower
+                    in HOP_BY_HOP_HEADERS
                 ):
                     continue
-                if lower == "set-cookie":
+                if (
+                    key_lower
+                    == "set-cookie"
+                ):
                     continue
-                if lower == "location":
-                    value = (
-                        rewrite_location(
-                            value,
-                            target,
-                            host
-                        )
+                if (
+                    key_lower
+                    == "location"
+                ):
+                    value = rewrite_location(
+                        value,
+                        target,
+                        host
                     )
                 response_headers.add(
                     key,
                     value
                 )
-            # Preserve multiple cookies
-            # while removing remote Domain=.
-            for cookie in (
-                backend_response
-                .headers
-                .getall(
-                    "Set-Cookie",
-                    []
-                )
+            proxy_response = web.Response(
+                status=response.status,
+                body=response_body,
+                headers=response_headers
+            )
+            for cookie in response.headers.getall(
+                "Set-Cookie",
+                []
             ):
-                response_headers.add(
+                proxy_response.headers.add(
                     "Set-Cookie",
                     rewrite_cookie(
                         cookie
                     )
                 )
-            return web.Response(
-                body=response_body,
-                status=(
-                    backend_response.status
-                ),
-                headers=response_headers
-            )
+            return proxy_response
     except Exception as error:
         print(
-            "[HTTP ERROR]",
+            f"[HTTP ERROR] {error}"
+        )
+        log_request(
+            request.method,
+            host,
             backend_url,
-            error
+            "HTTP",
+            "ERROR"
         )
         return web.Response(
             status=502,
@@ -1161,14 +1086,14 @@ async def proxy_http(
                 "reach the target."
             )
         )
-# ============================================================
-# WEBSOCKET PROXY
-# ============================================================
 async def proxy_websocket(
     request,
-    target,
-    session
+    target
 ):
+    global ACTIVE_WEBSOCKETS
+    session = request.app[
+        "session"
+    ]
     host = get_hostname(
         request
     )
@@ -1176,211 +1101,162 @@ async def proxy_websocket(
         target,
         request
     )
-    parsed = urlparse(
-        backend_url
-    )
-    if parsed.scheme == "https":
+    if backend_url.startswith(
+        "https://"
+    ):
         backend_ws_url = (
             "wss://"
-            + backend_url[
-                len("https://"):
-            ]
+            + backend_url[8:]
         )
     else:
         backend_ws_url = (
             "ws://"
-            + backend_url[
-                len("http://"):
-            ]
+            + backend_url[7:]
         )
-    REQUEST_LOGS.append(
-        {
-            "time":
-                datetime.now()
-                .strftime("%H:%M:%S"),
-            "method":
-                "WS",
-            "host":
-                host,
-            "target":
-                target,
-            "type":
-                "WebSocket"
-        }
-    )
+    requested_protocols = []
     protocol_header = (
         request.headers.get(
-            "Sec-WebSocket-Protocol",
-            ""
+            "Sec-WebSocket-Protocol"
         )
     )
-    protocols = [
-        item.strip()
-        for item
-        in protocol_header.split(",")
-        if item.strip()
-    ]
-    headers = (
-        make_upstream_headers(
-            request,
-            target,
-            websocket=True
-        )
+    if protocol_header:
+        requested_protocols = [
+            protocol.strip()
+            for protocol
+            in protocol_header.split(",")
+            if protocol.strip()
+        ]
+    headers = make_upstream_headers(
+        request,
+        target
+    )
+    log_request(
+        "WS",
+        host,
+        backend_ws_url,
+        "WEBSOCKET",
+        "CONNECTED"
     )
     print(
-        f"[WS] {host}"
-        f" -> {backend_ws_url}"
+        f"[WS] Browser -> {host}"
+    )
+    print(
+        f"[WS] Backend -> {backend_ws_url}"
     )
     try:
-        upstream_ws = (
-            await session.ws_connect(
-                backend_ws_url,
-                headers=headers,
-                protocols=protocols,
-                heartbeat=30
+        async with session.ws_connect(
+            backend_ws_url,
+            headers=headers,
+            protocols=requested_protocols,
+            heartbeat=30
+        ) as backend_ws:
+            browser_protocols = []
+            if backend_ws.protocol:
+                browser_protocols = [
+                    backend_ws.protocol
+                ]
+            elif requested_protocols:
+                browser_protocols = (
+                    requested_protocols
+                )
+            browser_ws = (
+                web.WebSocketResponse(
+                    protocols=browser_protocols,
+                    heartbeat=30
+                )
             )
-        )
+            await browser_ws.prepare(
+                request
+            )
+            ACTIVE_WEBSOCKETS += 1
+            print(
+                f"[WS] CONNECTED: "
+                f"{host} <-> "
+                f"{backend_ws_url}"
+            )
+            async def browser_to_backend():
+                async for msg in browser_ws:
+                    if msg.type == WSMsgType.TEXT:
+                        await backend_ws.send_str(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.BINARY:
+                        await backend_ws.send_bytes(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.PING:
+                        await backend_ws.ping(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.PONG:
+                        await backend_ws.pong(
+                            msg.data
+                        )
+            async def backend_to_browser():
+                async for msg in backend_ws:
+                    if msg.type == WSMsgType.TEXT:
+                        await browser_ws.send_str(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.BINARY:
+                        await browser_ws.send_bytes(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.PING:
+                        await browser_ws.ping(
+                            msg.data
+                        )
+                    elif msg.type == WSMsgType.PONG:
+                        await browser_ws.pong(
+                            msg.data
+                        )
+            task1 = asyncio.create_task(
+                browser_to_backend()
+            )
+            task2 = asyncio.create_task(
+                backend_to_browser()
+            )
+            done, pending = (
+                await asyncio.wait(
+                    [task1, task2],
+                    return_when=
+                    asyncio.FIRST_COMPLETED
+                )
+            )
+            for task in pending:
+                task.cancel()
+            await browser_ws.close()
+            return browser_ws
     except Exception as error:
         print(
-            "[WS ERROR]",
-            error
+            f"[WS ERROR] {error}"
+        )
+        log_request(
+            "WS",
+            host,
+            backend_ws_url,
+            "WEBSOCKET",
+            "ERROR"
         )
         return web.Response(
             status=502,
             text=(
-                "Could not connect "
-                "to target WebSocket."
+                "PortDock WebSocket "
+                "connection failed."
             )
         )
-    browser_protocols = []
-    if upstream_ws.protocol:
-        browser_protocols = [
-            upstream_ws.protocol
-        ]
-    elif protocols:
-        browser_protocols = (
-            protocols
-        )
-    browser_ws = (
-        web.WebSocketResponse(
-            protocols=browser_protocols,
-            heartbeat=30
-        )
-    )
-    await browser_ws.prepare(
-        request
-    )
-    print(
-        f"[WS] CONNECTED "
-        f"{host}"
-    )
-    async def browser_to_target():
-        try:
-            async for message in (
-                browser_ws
-            ):
-                if (
-                    message.type
-                    == WSMsgType.TEXT
-                ):
-                    await upstream_ws.send_str(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.BINARY
-                ):
-                    await upstream_ws.send_bytes(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.PING
-                ):
-                    await upstream_ws.ping(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.PONG
-                ):
-                    await upstream_ws.pong(
-                        message.data
-                    )
-                else:
-                    break
-        except Exception:
-            pass
-    async def target_to_browser():
-        try:
-            async for message in (
-                upstream_ws
-            ):
-                if (
-                    message.type
-                    == WSMsgType.TEXT
-                ):
-                    await browser_ws.send_str(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.BINARY
-                ):
-                    await browser_ws.send_bytes(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.PING
-                ):
-                    await browser_ws.ping(
-                        message.data
-                    )
-                elif (
-                    message.type
-                    == WSMsgType.PONG
-                ):
-                    await browser_ws.pong(
-                        message.data
-                    )
-                else:
-                    break
-        except Exception:
-            pass
-    tasks = [
-        asyncio.create_task(
-            browser_to_target()
-        ),
-        asyncio.create_task(
-            target_to_browser()
-        )
-    ]
-    done, pending = (
-        await asyncio.wait(
-            tasks,
-            return_when=(
-                asyncio.FIRST_COMPLETED
-            )
-        )
-    )
-    for task in pending:
-        task.cancel()
-    if not upstream_ws.closed:
-        await upstream_ws.close()
-    if not browser_ws.closed:
-        await browser_ws.close()
-    return browser_ws
-# ============================================================
-# MAIN ROUTING
-# ============================================================
+    finally:
+        if ACTIVE_WEBSOCKETS > 0:
+            ACTIVE_WEBSOCKETS -= 1
 async def main_handler(request):
     host = get_hostname(
         request
     )
     print(
-        f"[REQUEST] {request.method} "
-        f"{host}{request.rel_url}"
+        f"[REQUEST] "
+        f"{request.method} "
+        f"{host}"
+        f"{request.rel_url}"
     )
     if host == DASHBOARD_HOST:
         return await dashboard_handler(
@@ -1391,31 +1267,25 @@ async def main_handler(request):
         return web.Response(
             status=404,
             text=f"""
-<html>
-<body
-style="
-background:#090c11;
-color:white;
-font-family:Arial;
-padding:40px;
-"
->
-<h1>
-Unknown PortDock Service
-</h1>
-<p>
-{html.escape(host)}
-is not registered.
-</p>
-<a
-href="https://portdock.localhost/"
-style="color:#82adff"
->
-Open Dashboard
-</a>
-</body>
-</html>
-""",
+            <html>
+            <body style="
+                font-family:Arial;
+                background:#0b0f19;
+                color:white;
+                padding:40px;
+            ">
+            <h2>
+                PortDock Route Not Found
+            </h2>
+            <p>
+                No route exists for:
+            </p>
+            <strong>
+                {html.escape(host)}
+            </strong>
+            </body>
+            </html>
+            """,
             content_type="text/html"
         )
     target = routes[
@@ -1423,40 +1293,41 @@ Open Dashboard
     ]
     if (
         is_local_target(target)
-        and
-        not local_target_running(
-            target
-        )
+        and not local_target_running(target)
     ):
         return web.Response(
             status=503,
             text=f"""
-<html>
-<body
-style="
-background:#090c11;
-color:white;
-font-family:Arial;
-padding:40px;
-"
->
-<h1>
-Local Service Offline
-</h1>
-<p>
-Target:
-<b>
-{html.escape(target)}
-</b>
-</p>
-</body>
-</html>
-""",
+            <html>
+            <body style="
+                font-family:Arial;
+                background:#0b0f19;
+                color:white;
+                padding:40px;
+            ">
+            <h2>
+                Backend Offline
+            </h2>
+            <p>
+                PortDock found the route:
+            </p>
+            <p>
+            <strong>
+                {html.escape(host)}
+            </strong>
+            →
+            <strong>
+                {html.escape(target)}
+            </strong>
+            </p>
+            <p>
+                Start the backend service and refresh.
+            </p>
+            </body>
+            </html>
+            """,
             content_type="text/html"
         )
-    session = request.app[
-        "client_session"
-    ]
     upgrade = (
         request.headers
         .get(
@@ -1468,35 +1339,27 @@ Target:
     if upgrade == "websocket":
         return await proxy_websocket(
             request,
-            target,
-            session
+            target
         )
     return await proxy_http(
         request,
-        target,
-        session
+        target
     )
-# ============================================================
-# HTTP -> HTTPS
-# ============================================================
 async def redirect_handler(request):
-    host = get_hostname(
-        request
+    host = request.host.split(
+        ":"
+    )[0]
+    location = (
+        f"https://{host}"
+        f"{request.rel_url}"
     )
-    raise web.HTTPPermanentRedirect(
-        location=(
-            f"https://{host}"
-            f"{request.rel_url}"
-        )
+    raise web.HTTPMovedPermanently(
+        location=location
     )
-# ============================================================
-# APPLICATIONS
-# ============================================================
 async def create_https_app():
     app = web.Application(
-        client_max_size=(
-            100 * 1024 * 1024
-        )
+        client_max_size=
+        100 * 1024 * 1024
     )
     timeout = ClientTimeout(
         total=None,
@@ -1504,15 +1367,13 @@ async def create_https_app():
         sock_connect=20,
         sock_read=None
     )
-    app[
-        "client_session"
-    ] = ClientSession(
+    app["session"] = ClientSession(
         timeout=timeout,
         auto_decompress=False
     )
     async def cleanup(app):
         await app[
-            "client_session"
+            "session"
         ].close()
     app.on_cleanup.append(
         cleanup
@@ -1525,13 +1386,17 @@ async def create_https_app():
         "/__portdock__/remove/{name}",
         remove_service
     )
+    app.router.add_get(
+        "/__portdock__/status",
+        status_handler
+    )
     app.router.add_route(
         "*",
         "/{path:.*}",
         main_handler
     )
     return app
-def create_http_app():
+async def create_http_app():
     app = web.Application()
     app.router.add_route(
         "*",
@@ -1539,31 +1404,24 @@ def create_http_app():
         redirect_handler
     )
     return app
-# ============================================================
-# START
-# ============================================================
 async def start_portdock():
     print()
-    print(
-        "=========================================="
-    )
-    print(
-        "                 PORTDOCK"
-    )
-    print(
-        "=========================================="
-    )
-    print()
+    print("=" * 55)
+    print("PORTDOCK")
+    print("Local Reverse Proxy")
+    print("=" * 55)
     if not os.path.exists(
         MKCERT_FILE
     ):
+        print()
         print(
-            "ERROR: mkcert.exe not found."
+            "ERROR: mkcert.exe was not found."
         )
         return
     if port_is_used(
         HTTP_PORT
     ):
+        print()
         print(
             "ERROR: Port 80 is already used."
         )
@@ -1571,12 +1429,14 @@ async def start_portdock():
     if port_is_used(
         HTTPS_PORT
     ):
+        print()
         print(
             "ERROR: Port 443 is already used."
         )
         return
+    print()
     print(
-        "Preparing HTTPS certificates..."
+        "[TLS] Loading certificates..."
     )
     ssl_context = (
         create_main_ssl_context()
@@ -1585,17 +1445,13 @@ async def start_portdock():
         await create_https_app()
     )
     http_app = (
-        create_http_app()
+        await create_http_app()
     )
-    https_runner = (
-        web.AppRunner(
-            https_app
-        )
+    https_runner = web.AppRunner(
+        https_app
     )
-    http_runner = (
-        web.AppRunner(
-            http_app
-        )
+    http_runner = web.AppRunner(
+        http_app
     )
     await https_runner.setup()
     await http_runner.setup()
@@ -1614,56 +1470,49 @@ async def start_portdock():
     await http_site.start()
     print()
     print(
-        "PortDock is running."
+        "PortDock is running!"
     )
     print()
     print(
         "Dashboard:"
     )
     print(
-        "https://portdock.localhost/"
+        "https://portdock.localhost"
     )
     print()
     print(
-        "Local targets: ENABLED"
+        "HTTP  : 127.0.0.1:80"
     )
     print(
-        "Remote targets: ENABLED"
-    )
-    print(
-        "HTTP proxy: ENABLED"
-    )
-    print(
-        "WebSockets: ENABLED"
-    )
-    print(
-        "Automatic TLS: ENABLED"
+        "HTTPS : 127.0.0.1:443"
     )
     print()
     routes = load_routes()
     if routes:
         print(
-            "Registered services:"
+            "Registered routes:"
         )
-        for domain, target in (
-            routes.items()
-        ):
+        for domain, target in routes.items():
             print(
-                f"https://{domain}"
+                f"  https://{domain}"
                 f" -> {target}"
             )
+    else:
+        print(
+            "No routes registered yet."
+        )
     print()
     print(
-        "Press CTRL+C to stop."
+        "Press Ctrl+C to stop."
     )
     try:
-        await asyncio.Event().wait()
+        while True:
+            await asyncio.sleep(
+                3600
+            )
     finally:
         await https_runner.cleanup()
         await http_runner.cleanup()
-# ============================================================
-# ENTRY
-# ============================================================
 if __name__ == "__main__":
     try:
         asyncio.run(
