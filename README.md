@@ -14,7 +14,7 @@ Whether you're juggling microservices, testing OAuth flows, or debugging live we
 * **Instant Production-Grade HTTPS:** Automatically generates trusted local SSL certificates via `mkcert` on the fly, meaning secure cookies, token redirects, and HTTPS webhooks will finally behave identically to production.
 * **Bulletproof WebSockets:** Full, uncompromised bidirectional WebSocket support out of the box—essential for frameworks like Streamlit, Vite, and real-time dashboards.
 * **Local & Remote Flexibility:** It doesn't just map local ports; it can proxy and re-route remote URLs as well, rewriting cookies and redirect headers dynamically.
-* **The Command Center Dashboard:** A sleek, unified web interface running right at `https://portdock.localhost/` to monitor online/offline server liveness and stream live proxy request logs in real time.
+* **The Command Center Dashboard:** A sleek, unified web interface running right at `https://portdock.localhost/` to monitor running/remote server liveness and stream live proxy request logs.
 
 ---
 
