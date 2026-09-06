@@ -1,32 +1,42 @@
-# PortDock 🥶
+# PortDock 🚀⚡
 
-PortDock is a high-performance local reverse proxy and control plane designed to map multiple local development servers and remote websites to clean, secure `.localhost` domains (e.g., `https://my-app.localhost`). 
+> **Stop wrestling with port numbers and broken local environments.** 
 
-It provides automatic TLS certificate generation, WebSocket support, cookie/redirect rewriting, and a modern web dashboard for real-time traffic monitoring.
+PortDock is an elite, high-performance local reverse proxy and control plane engineered to intercept messy, random local development ports (like `localhost:3000`, `8501`, or `5000`) and map them instantly to clean, lightning-fast, secure `.localhost` domains (e.g., `https://my-app.localhost`). 
 
----
-
-## Features
-
-* **Custom Local Domains:** Map any local port (e.g., `8501`, `3000`) or remote URL to a clean `*.localhost` domain.
-* **Automatic TLS / HTTPS:** Uses `mkcert` to generate trusted local SSL certificates on the fly.
-* **WebSocket Proxying:** Full bidirectional support for real-time applications (like Streamlit, Vite, or WebSockets).
-* **Header & Cookie Rewriting:** Automatically strips hop-by-hop headers, handles multiple cookies, and rewrites redirect locations.
-* **Unified Dashboard:** Monitor running services, view live request logs, and manage routes instantly through an intuitive UI.
+Whether you're juggling microservices, testing OAuth flows, or debugging live web apps, PortDock gives you absolute command over your local traffic.
 
 ---
 
-## Prerequisites (Windows)
+## 🔥 Why PortDock Destroys the Alternatives
 
-1. **Python 3.8+** installed on your Windows machine.
-2. **`mkcert`** installed and set up in your project directory as `mkcert.exe` for local SSL generation.
+* **Zero Hosts-File Hell:** No more manually editing your system's `/etc/hosts` file every time you spin up a new project. PortDock handles routing dynamically.
+* **Instant Production-Grade HTTPS:** Automatically generates trusted local SSL certificates via `mkcert` on the fly, meaning secure cookies, token redirects, and HTTPS webhooks will finally behave identically to production.
+* **Bulletproof WebSockets:** Full, uncompromised bidirectional WebSocket support out of the box—essential for frameworks like Streamlit, Vite, and real-time dashboards.
+* **Local & Remote Flexibility:** It doesn't just map local ports; it can proxy and re-route remote URLs as well, rewriting cookies and redirect headers dynamically.
+* **The Command Center Dashboard:** A sleek, unified web interface running right at `https://portdock.localhost/` to monitor online/offline server liveness and stream live proxy request logs in real time.
 
 ---
 
-## Installation & Setup
+## 🛠️ Tech Stack & Architecture
 
-1. Clone or download the repository containing `portdock.py`.
-2. Ensure `mkcert.exe` is placed in the root project folder alongside `portdock.py`.
-3. Install the required Python dependencies via your terminal:
+* **Core Engine:** Built on asynchronous Python (`asyncio` + `aiohttp`) for high-concurrency performance and minimal overhead.
+* **Security & TLS:** Integrated `mkcert` wrapper for local certificate authority generation.
+* **Data Persistence:** Lightweight JSON routing configuration (`routes.json`).
+
+---
+
+## ⚙️ Prerequisites & Setup (Windows)
+
+1. **Python 3.8+** installed on your machine.
+2. **`mkcert`** installed and set up inside your project directory as `mkcert.exe` for zero-warning local SSL.
+
+---
+
+## 🚀 Quick Start Guide
+
+1. Clone or open your project directory containing `portdock.py`.
+2. Ensure `mkcert.exe` sits in the root folder alongside the script.
+3. Install the required high-performance networking dependencies:
    ```bash
    pip install aiohttp multidict
