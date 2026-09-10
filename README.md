@@ -1,4 +1,4 @@
-# PortDock 😈
+# PortDock lite
 
 > **Stop wrestling with port numbers and broken local environments.** 
 
